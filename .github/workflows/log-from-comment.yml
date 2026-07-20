@@ -1,0 +1,85 @@
+name: Record learning log
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: daily-biomed-log-main
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.login == github.repository_owner &&
+      contains(github.event.issue.labels.*.name, 'daily-log-inbox') &&
+      startsWith(github.event.comment.body, '/log ')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build today's entry
+        id: entry
+        env:
+          LEARNING_COMMENT: ${{ github.event.comment.body }}
+          SOURCE_URL: ${{ github.event.comment.html_url }}
+        shell: bash
+        run: |
+          entry_path="$(python scripts/add_entry.py --comment "$LEARNING_COMMENT" --source-url "$SOURCE_URL")"
+          echo "entry_path=$entry_path" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$(git status --porcelain -- "$entry_path")" ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the entry as the commenter
+        if: steps.entry.outputs.created == 'true'
+        env:
+          COMMENTER_ID: ${{ github.event.comment.user.id }}
+          COMMENTER_LOGIN: ${{ github.event.comment.user.login }}
+          ENTRY_PATH: ${{ steps.entry.outputs.entry_path }}
+        shell: bash
+        run: |
+          git config user.name "$COMMENTER_LOGIN"
+          git config user.email "$COMMENTER_ID+$COMMENTER_LOGIN@users.noreply.github.com"
+          git add -- "$ENTRY_PATH"
+          git commit -m "log: record ${ENTRY_PATH##*/}"
+          git push origin main
+
+      - name: Confirm the result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ENTRY_PATH: ${{ steps.entry.outputs.entry_path }}
+          CREATED: ${{ steps.entry.outputs.created }}
+        shell: bash
+        run: |
+          if [ "$CREATED" = "true" ]; then
+            body="✅ 已记录到 [\`$ENTRY_PATH\`](https://github.com/$GITHUB_REPOSITORY/blob/main/$ENTRY_PATH)。今天的经验值已到账。"
+          else
+            body="↩️ 这条评论已经记录过了，没有重复写入。"
+          fi
+
+          gh issue comment "$ISSUE_NUMBER" --body "$body"
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
+            -f content=hooray \
+            --silent
