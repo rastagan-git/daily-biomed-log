@@ -1,0 +1,59 @@
+name: Automatic daily log
+
+on:
+  schedule:
+    # 09:17 and 21:17 Singapore / China time; second run is a fallback.
+    - cron: "17 1,13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-biomed-log-main
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Singapore
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify the log tools
+        run: |
+          python -m unittest discover -s tests -v
+          python -m py_compile scripts/add_entry.py scripts/auto_entry.py
+      - name: Create today's automatic record
+        id: entry
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          entry_path="$(python scripts/auto_entry.py --run-url "$RUN_URL")"
+          echo "entry_path=$entry_path" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git status --porcelain -- "$entry_path")" ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit the automatic record
+        if: steps.entry.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ENTRY_PATH: ${{ steps.entry.outputs.entry_path }}
+        shell: bash
+        run: |
+          owner_id="$(gh api "users/$REPOSITORY_OWNER" --jq .id)"
+          git config user.name "$REPOSITORY_OWNER"
+          git config user.email "$owner_id+$REPOSITORY_OWNER@users.noreply.github.com"
+          git add -- "$ENTRY_PATH"
+          git commit -m "log: automatic daily record ${ENTRY_PATH##*/}"
+          git push origin HEAD:main
